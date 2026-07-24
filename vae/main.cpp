@@ -12,6 +12,7 @@ mt19937 global_rng;
 normal_distribution<double> n_dist(0,1);
 
 class Sampling : public Pass { // first half of input vector rapresents means while the other half is log variance (base e)
+public:
 	Eigen::VectorXd grad_eps;
 	Eigen::VectorXd grad_std;
 	Eigen::VectorXd forward(const Eigen::VectorXd& in) override {
@@ -32,7 +33,7 @@ class Sampling : public Pass { // first half of input vector rapresents means wh
 	void apply_gradients(double lr) override {};
 	Eigen::VectorXd compute_gradients(const Eigen::VectorXd& flow_back) override {
 		Eigen::VectorXd ret_flow_back(flow_back.size()*2);
-		ret_flow_back << flow_back,flow_back.array()*grad_eps.array()*grad_std.array();
+		ret_flow_back << flow_back,flow_back.array()*grad_eps.array()*grad_std.array()*0.5;
 		return ret_flow_back;
 	}
 };
@@ -48,8 +49,6 @@ int main() {
 		new Dropout(0.3),
 
 		new Dense(128,32),
-
-		new Sampling(), // converts the 32 values to 16 samples from input distributions and allows gradient to flow correctly
 	}};
 
 	Sequential decoder = {{
@@ -65,7 +64,7 @@ int main() {
 		new Sigmoid()
 	}};
 
-	
+	Sampling sampler; // converts the 32 values to 16 samples from input distributions and allows gradient to flow correctly
 
 	vector<Eigen::Vector<double,784>> train_X,test_X;
 
@@ -77,6 +76,8 @@ int main() {
 	int epochs = 128;
 	int batch_size = 64;
 	double lr = 0.03;
+	double beta = 0.01; // kl divergence contribution to loss function
+
 
 	vector<size_t> indecies(train_X.size(),0);
 	iota(indecies.begin(),indecies.end(),0ull);
@@ -88,7 +89,8 @@ int main() {
 		for(int _i = 0; _i < train_X.size(); _i += 1) {
 			auto i = indecies[_i];
 			
-			auto latent = encoder.grad_forward(train_X[i]);
+			auto latent_dist = encoder.grad_forward(train_X[i]);
+			auto latent = sampler.grad_forward(latent_dist);
 			auto reconstruction = decoder.grad_forward(latent);
 
 			// derivative of mse in respect to p is 2*(p-y)
@@ -97,7 +99,16 @@ int main() {
 			
 			cost += (reconstruction - train_X[i]).array().pow(2).mean();
 
-			encoder.compute_gradients(decoder.compute_gradients(d_cost));
+			Eigen::VectorXd decoder_grad = 
+			decoder.compute_gradients(d_cost);
+			Eigen::VectorXd sampler_grad = sampler.compute_gradients(decoder_grad);
+			
+			Eigen::VectorXd kl_div(latent_dist.size());
+
+			size_t h_dim = latent_dist.size() / 2;
+			kl_div << 2*latent_dist.segment(0,h_dim),(latent_dist.segment(h_dim,h_dim).array().exp()-1)*0.5;
+
+			encoder.compute_gradients(sampler_grad+beta*kl_div);
 
 			if(_i % batch_size == 0 && _i != 0) {
 				encoder.apply_gradients(lr);
