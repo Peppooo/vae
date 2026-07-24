@@ -78,7 +78,6 @@ int main() {
 	double lr = 0.03;
 	double beta = 0.01; // kl divergence contribution to loss function
 
-
 	vector<size_t> indecies(train_X.size(),0);
 	iota(indecies.begin(),indecies.end(),0ull);
 
@@ -106,7 +105,7 @@ int main() {
 			Eigen::VectorXd kl_div(latent_dist.size());
 
 			size_t h_dim = latent_dist.size() / 2;
-			kl_div << 2*latent_dist.segment(0,h_dim),(latent_dist.segment(h_dim,h_dim).array().exp()-1)*0.5;
+			kl_div << 2*latent_dist.segment(0,h_dim),(latent_dist.segment(h_dim,h_dim).array().exp()-1);
 
 			encoder.compute_gradients(sampler_grad+beta*kl_div);
 
