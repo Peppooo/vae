@@ -123,6 +123,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="loader.h" />
     <ClInclude Include="mnist.h" />
     <ClInclude Include="nn.h" />
   </ItemGroup>
