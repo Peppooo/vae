@@ -15,9 +15,6 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="nn.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
     <ClInclude Include="mnist.h">
       <Filter>Source Files</Filter>
     </ClInclude>
