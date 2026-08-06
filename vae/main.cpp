@@ -1,106 +1,169 @@
+#pragma once
 #define _USE_MATH_DEFINES
+#define NOMINMAX
 #include <iostream>
 #include <Eigen/Eigen>
 #include <random>
 #include <SDL3/SDL.h>
-#include "nn.h"
+#include <nn.h>
 #include "mnist.h"
 #include "loader.h"
 
 using namespace std;
 
 mt19937 global_rng;
-normal_distribution<double> n_dist(0,1);
+normal_distribution<float> n_dist(0,1);
 
 class Sampling : public Pass { // first half of input vector rapresents means while the other half is log variance (base e)
 public:
-	Eigen::VectorXd grad_eps;
-	Eigen::VectorXd grad_std;
-	Eigen::VectorXd forward(const Eigen::VectorXd& in) override {
+	Eigen::VectorXf grad_eps;
+	Eigen::VectorXf grad_std;
+	Eigen::VectorXf forward(const Eigen::VectorXf& in) override {
 		size_t out_samples = in.size() / 2;
 		auto mean = in.segment(0,out_samples);
-		auto std = (in.segment(out_samples,out_samples).array()*0.5).exp();
-		Eigen::VectorXd eps = Eigen::VectorXd::NullaryExpr(out_samples,[]() { return n_dist(global_rng); });
+		auto std = (in.segment(out_samples,out_samples).array()*0.5f).exp();
+		Eigen::VectorXf eps = Eigen::VectorXf::NullaryExpr(out_samples,[]() { return n_dist(global_rng); });
 		return mean.array() + eps.array() * std.array();
 	}
-	Eigen::VectorXd grad_forward(const Eigen::VectorXd& in) override {
+	Eigen::VectorXf grad_forward(const Eigen::VectorXf& in) override {
 		size_t out_samples = in.size() / 2;
 		auto mean = in.segment(0,out_samples);
-		grad_std = (in.segment(out_samples,out_samples).array() * 0.5).exp();
-		grad_eps = Eigen::VectorXd::NullaryExpr(out_samples,[]() { return n_dist(global_rng); });
+		grad_std = (in.segment(out_samples,out_samples).array() * 0.5f).exp();
+		grad_eps = Eigen::VectorXf::NullaryExpr(out_samples,[]() { return n_dist(global_rng); });
 		return mean.array() + grad_eps.array() * grad_std.array();
 	}
-	void reset_gradients() override {};
-	void apply_gradients(double lr) override {};
-	Eigen::VectorXd compute_gradients(const Eigen::VectorXd& flow_back) override {
-		Eigen::VectorXd ret_flow_back(flow_back.size()*2);
+	Eigen::VectorXf compute_gradients(const Eigen::VectorXf& flow_back) override {
+		Eigen::VectorXf ret_flow_back(flow_back.size()*2);
 		ret_flow_back << flow_back,flow_back.array()*grad_eps.array()*grad_std.array()*0.5;
 		return ret_flow_back;
 	}
 };
 
+class ResidualBlock : public Pass {
+public:
+	Sequential stack;
+	ResidualBlock(size_t dim,size_t scale = 4):stack({}) {
+		stack = Sequential({
+				new LayerNorm(dim),
+				new Dense(dim, dim * scale),
+				new GeLU(),
+				new Dropout(0.1f),
+				new Dense(dim * scale, dim)
+			});
+	};
+	Eigen::VectorXf forward(const Eigen::VectorXf& in) override {
+		return 0.1*stack.forward(in) + in;
+	}
+	Eigen::VectorXf grad_forward(const Eigen::VectorXf& in) override {
+		return 0.1*stack.grad_forward(in) + in;
+	}
+	Eigen::VectorXf compute_gradients(const Eigen::VectorXf& flow_back) override {
+		return 0.1*stack.compute_gradients(flow_back) + flow_back;
+	}
+	size_t param_size() const override {
+		return stack.param_size();
+	}
+	void param_store(float* dest) const override {
+		stack.param_store(dest);
+	}
+	void param_load(float* src) override {
+		stack.param_load(src);
+	}
+};
+
+Sequential encoder({
+		new Dense(3072,512),
+		new GeLU(),
+		new Dropout(0.1f),
+
+		new ResidualBlock(512),
+		new GeLU(),
+		new Dropout(0.1f),
+
+		new Dense(512,256),
+	});
+
+Sequential decoder({
+	new Dense(128,512,0.01f),
+	new GeLU(),
+
+	new ResidualBlock(512),
+	new GeLU(),
+
+	new Dense(512,3072,0.1f),
+	new Sigmoid()
+});
+
+void draw_buff_rgb(SDL_Renderer* ren,Eigen::VectorXf& buffer,size_t w) {
+	SDL_RenderClear(ren);
+
+	buffer *= 255;
+
+	for(int j = 0; j < buffer.size()/3; j++) {
+		//Uint8 c = buffer(j)*255;
+		float* c = buffer.data() + (j * 3);
+		SDL_SetRenderDrawColor(ren,*(c),*(c + 1),*(c + 2),255);
+		SDL_RenderPoint(ren,j % w,j / w);
+	}
+
+	buffer /= 255;
+
+	SDL_RenderPresent(ren);
+}
+
+void draw_buff(SDL_Renderer* ren,Eigen::VectorXf& buffer,size_t w) {
+	SDL_RenderClear(ren);
+	for(int j = 0; j < buffer.size(); j++) {
+		Uint8 c = buffer(j)*255;
+		SDL_SetRenderDrawColor(ren,c,c,c,255);
+		SDL_RenderPoint(ren,j % w,j / w);
+	}
+	SDL_RenderPresent(ren);
+}
+
+Sampling sampler; // generates samples from input distributions and allows gradient to flow correctly
+
+Sequential model({&encoder,&sampler,&decoder}); // full model
 int main() {
-	Sequential encoder = {{
-		new Dense(5600,1024),
-		new ReLU(),
-		new Dropout(0.5),
+	srand(time(0));
 
-		new Dense(1024,256),
-		new ReLU(),
-		new Dropout(0.4),
+	vector<int> labels;
+	auto train_X = load_images_rgb("C:\\Users\\pietr\\Desktop\\datasets\\ffhq32\\",&labels,8192);
 
-		new Dense(256,64,0.01),
-	}};
+	model.load_model("model_ffhq32c.bin");
 
-	Sequential decoder = {{
-		new Dense(32,256,0.01),
-		new LeakyReLU(0.05),
-
-		new Dense(256,1024,0.05),
-		new LeakyReLU(0.05),
-
-		new Dense(1024,5600,0.1),
-		new Sigmoid()
-	}}; // 12 million parameters
-	// adding convolutional layers would lower model complexity (faster training) and have better fitting
-
-
-	Sampling sampler; // converts the 32 values to 16 samples from input distributions and allows gradient to flow correctly
-
-	/*
-	vector<string> cloth_names_labels = {"T - shirt / top","Trouser","Pullover","Dress","Coat","Sandal","Shirt","Sneaker","Bag","Ankle boot"};
-
-	vector<Eigen::Vector<double,784>> train_X,test_X;
-	vector<uint8_t> train_labels, test_labels;
-
-	mnist::read_images("C:\\Users\\pietr\\source\\repos\\neural-net\\training\\digits\\train-images.idx3-ubyte",train_X);
-	mnist::read_images("C:\\Users\\pietr\\source\\repos\\neural-net\\training\\digits\\test-images.idx3-ubyte",test_X);
-
-	mnist::read_labels("C:\\Users\\pietr\\source\\repos\\neural-net\\training\\digits\\train-labels.idx1-ubyte", nullptr, train_labels);
-	mnist::read_labels("C:\\Users\\pietr\\source\\repos\\neural-net\\training\\digits\\test-labels.idx1-ubyte", nullptr, test_labels);
-	*/
-
-	auto train_X = load_images("C:\\Users\\pietr\\Desktop\\datasets\\ORL\\");
-
-	int epochs = 128;
-	int batch_size = 64;
-	double lr = 0.003;
-	double beta = 0.3; // kl divergence contribution to loss function
+	cout << "model.param_size() = " << model.param_size() << endl;
 
 	SDL_Init(SDL_INIT_VIDEO);
 
-	SDL_Window*win; SDL_Renderer*ren;
-	SDL_CreateWindowAndRenderer("new sample",350,400,0,&win,&ren);
-	SDL_SetRenderLogicalPresentation(ren,70,80,SDL_LOGICAL_PRESENTATION_INTEGER_SCALE);
+	SDL_Window* win; SDL_Renderer* ren;
+	SDL_Window* win2; SDL_Renderer* ren2;
+	SDL_CreateWindowAndRenderer("reconstruction",512,512,0,&win,&ren);
+	SDL_CreateWindowAndRenderer("original",512,512,0,&win2,&ren2);
+	SDL_SetRenderLogicalPresentation(ren,32,32,SDL_LOGICAL_PRESENTATION_INTEGER_SCALE);
+	SDL_SetRenderLogicalPresentation(ren2,32,32,SDL_LOGICAL_PRESENTATION_INTEGER_SCALE);
+	SDL_HideWindow(win2);
+	SDL_Event e;
+
+	int epochs = 262144;
+	int batch_size = 32;
+	float lr = 0.001;
+	float beta = 1.5; // kl divergence contribution to loss function
 
 
 	vector<size_t> indecies(train_X.size(),0);
 	iota(indecies.begin(),indecies.end(),0ull);
+	
+
 
 	for(int epoch = 1; epoch <= epochs; epoch++) {	
-		double cost = 0;
 
 		shuffle(indecies.begin(),indecies.end(),global_rng);
+
+		//beta = min(1,(epochs / 50.0));
+		
+		float cost = 0;
+
 		for(int _i = 0; _i < train_X.size(); _i += 1) {
 			auto i = indecies[_i];
 
@@ -108,58 +171,47 @@ int main() {
 			auto latent = sampler.grad_forward(latent_dist);
 			auto reconstruction = decoder.grad_forward(latent);
 
-			// derivative of mse in respect to p is 2*(p-y)
+			Eigen::VectorXf d_cost = (reconstruction - train_X[i]).unaryExpr(&_sign);// l1 cost function, generates sharper images while l2 generates blurrier 
 
-			Eigen::VectorXd d_cost = 2*(reconstruction - train_X[i]);
+			cost += (reconstruction - train_X[i]).array().abs().mean();
 
-			cost += (reconstruction - train_X[i]).array().pow(2).mean();
+			Eigen::VectorXf decoder_grad = decoder.compute_gradients(d_cost);
+			Eigen::VectorXf sampler_grad = sampler.compute_gradients(decoder_grad);
 
-			Eigen::VectorXd decoder_grad =
-			decoder.compute_gradients(d_cost);
-			Eigen::VectorXd sampler_grad = sampler.compute_gradients(decoder_grad);
-
-			Eigen::VectorXd kl_div(latent_dist.size());
+			Eigen::VectorXf kl_div(latent_dist.size());
 
 			size_t h_dim = latent_dist.size() / 2;
-			kl_div << latent_dist.segment(0,h_dim),(latent_dist.segment(h_dim,h_dim).array().exp()-1)*0.5;
+			kl_div << latent_dist.segment(0,h_dim),(latent_dist.segment(h_dim,h_dim).array().exp()-1.0f)*0.5f;
 
-			encoder.compute_gradients(sampler_grad+beta*kl_div);
+			encoder.compute_gradients(sampler_grad + beta * kl_div);
+
 
 			if(_i % batch_size == 0 && _i != 0) {
-				encoder.apply_gradients(lr);
-				decoder.apply_gradients(lr);
+				model.apply_gradients(lr);
 			}
 		}
 
-		encoder.apply_gradients(lr); // apply possible remaining gradients
-		decoder.apply_gradients(lr);
+		model.apply_gradients(lr);
 
-		SDL_RenderClear(ren);
+		model.save_model("model_ffhq32c.bin");
 
-		Eigen::Vector<double,64> lat;
-		lat.setZero();
+
+		Eigen::VectorXf buffer = decoder.forward(Eigen::VectorXf::NullaryExpr(128,[]() { return n_dist(global_rng); }));
 		
+		draw_buff_rgb(ren,buffer,32);
 
-		int acc = 0;
-		for(int i = 1; i < 10;i++) {
-			//if(train_labels[i] == 8) {
-			lat += encoder.forward(train_X[i]);
-			acc++;
+		Eigen::VectorXf avg_mu = Eigen::VectorXf::Zero(128),max_var = Eigen::VectorXf::Ones(128) * -INFINITY;
+		for(int i = 0; i < train_X.size(); i++) {
+			auto lat = encoder.forward(train_X[i]);
+			auto mu = lat.segment(0,128),logvar = lat.segment(128,256);
+			auto var = (logvar * 0.5).array().exp();
+			max_var = max_var.array().max(var);
+			avg_mu += mu;
 		}
-		lat /= acc;
-
-		Eigen::Vector<double,5600> buffer = decoder.forward(lat.segment(0,32));
-
-		for(int j = 0; j < 5600; j++) {
-			Uint8 c = buffer(j) * 255;
-			SDL_SetRenderDrawColor(ren,c,c,c,255);
-			SDL_RenderPoint(ren,j % 70,j / 70);
-		}
-
-		SDL_RenderPresent(ren);
+		avg_mu /= train_X.size();
 
 		cost /= train_X.size();
-		cout << "epoch " << epoch << " cost " << cost << endl;
+		cout << "epoch " << epoch << " cost " << cost << " latent mu=" << avg_mu.mean() << " var=" << max_var.mean() << endl; // these are averages for mean and max averaged to reduce dimensionality
 
 	}
 
