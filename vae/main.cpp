@@ -1,6 +1,8 @@
 #pragma once
 #define _USE_MATH_DEFINES
 #define NOMINMAX
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define _CRT_SECURE_NO_WARNINGS
 #include <iostream>
 #include <Eigen/Eigen>
 #include <random>
@@ -8,6 +10,7 @@
 #include <nn.h>
 #include "mnist.h"
 #include "loader.h"
+#include <stb_image_write.h>
 
 using namespace std;
 
@@ -121,16 +124,30 @@ void draw_buff(SDL_Renderer* ren,Eigen::VectorXf& buffer,size_t w) {
 	SDL_RenderPresent(ren);
 }
 
+vector<uint8_t> make_image_grid(const vector<Eigen::VectorXf>& images,const size_t img_w,const size_t img_h,const size_t rows) {
+	assert(images.size() % rows == 0 && rows > 0);
+	vector<uint8_t> result(images.size()*img_w*img_h*3);
+	const size_t cols = images.size() / rows;
+	for(int i = 0; i < images.size(); i++) {
+		Eigen::Vector<uint8_t,-1> img = (images[i]*255).cast<uint8_t>();
+
+		for(int j = 0; j < img_h; j++) {
+			copy(img.begin() + j * img_w * 3,img.begin() + (j + 1) * img_w * 3,result.begin() + ((i / cols) * img_h + j) * cols * img_w * 3 + (i % cols) * img_w * 3);
+		}
+	}
+	return result;
+}
+
 Sampling sampler; // generates samples from input distributions and allows gradient to flow correctly
 
 Sequential model({&encoder,&sampler,&decoder}); // full model
 int main() {
-	srand(time(0));
+	global_rng.seed(time(0));
 
 	vector<int> labels;
-	auto train_X = load_images_rgb("C:\\Users\\pietr\\Desktop\\datasets\\ffhq32\\",&labels,8192);
+	auto train_X = load_images_rgb("C:\\Users\\pietr\\Desktop\\datasets\\ffhq32\\",&labels,256);
 
-	model.load_model("model_ffhq32c.bin");
+	model.load_model("model_ffhq32_norm.bin");
 
 	cout << "model.param_size() = " << model.param_size() << endl;
 
@@ -148,7 +165,7 @@ int main() {
 	int epochs = 262144;
 	int batch_size = 32;
 	float lr = 0.001;
-	float beta = 1.5; // kl divergence contribution to loss function
+	float beta = 1; // kl divergence contribution to loss function
 
 
 	vector<size_t> indecies(train_X.size(),0);
@@ -193,7 +210,7 @@ int main() {
 
 		model.apply_gradients(lr);
 
-		model.save_model("model_ffhq32c.bin");
+		model.save_model("model_ffhq32_norm.bin");
 
 
 		Eigen::VectorXf buffer = decoder.forward(Eigen::VectorXf::NullaryExpr(128,[]() { return n_dist(global_rng); }));
@@ -208,9 +225,11 @@ int main() {
 			max_var = max_var.array().max(var);
 			avg_mu += mu;
 		}
+
 		avg_mu /= train_X.size();
 
 		cost /= train_X.size();
+
 		cout << "epoch " << epoch << " cost " << cost << " latent mu=" << avg_mu.mean() << " var=" << max_var.mean() << endl; // these are averages for mean and max averaged to reduce dimensionality
 
 	}
